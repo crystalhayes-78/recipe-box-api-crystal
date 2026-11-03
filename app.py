@@ -8,11 +8,20 @@ That is the point: you will add both, lesson by lesson, in Units 2 and 3.
 import sqlite3
 
 from flask import Flask, g, jsonify, request
+from werkzeug.security import generate_password_hash, check_password_hash
 
 DATABASE = "recipes.db"
 
 app = Flask(__name__)
 
+
+def hash_password(password: str) -> str:
+    """Return a secure, one-way hash for storing this password."""
+    return generate_password_hash(password)
+
+def verify_password(stored_hash: str, candidate_password: str) -> bool:
+    """Return True if the candidate password matches the stored hash."""
+    return check_password_hash(stored_hash, candidate_password)
 
 def get_db():
     if "db" not in g:
@@ -20,7 +29,6 @@ def get_db():
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
-
 
 @app.teardown_appcontext
 def close_db(exception):
