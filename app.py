@@ -17,7 +17,7 @@ app = Flask(__name__)
 
 def hash_password(password: str) -> str:
     """Return a secure, one-way hash for storing this password."""
-    return generate_password_hash(password)
+    return generate_password_hash(password, method="pbkdf2:sha256")
 
 def verify_password(stored_hash: str, candidate_password: str) -> bool:
     """Return True if the candidate password matches the stored hash."""
@@ -135,6 +135,65 @@ def delete_recipe(recipe_id):
         return jsonify({"error": "recipe not found"}), 404
     return "", 204
 
+@app.post("/register")
+def register():
+    data = request.get_json(silent=True)
+
+    # 1. Validate input
+    if not data:
+        return jsonify({"error": "JSON body is required"}), 400
+
+    username = data.get("username")
+    email = data.get("email")
+    password = data.get("password")
+
+    if not username or not email or not password:
+        return jsonify({"error": "username, email, and password are required"}), 400
+
+    # 2. Hash the password
+    password_hash = hash_password(password)
+
+    # 3. Insert user into the database
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
+            (username, email, password_hash),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        # could be duplicate username or email
+        return jsonify({"error": "an account with that username or email already exists"}), 409
+
+    # 4. Return success (do NOT return password or hash)
+   
+@app.post("/login")
+def login():
+    data = request.get_json(silent=True)
+
+    if not data:
+        return jsonify({"error": "JSON body is required"}), 400
+
+    username = data.get("username")
+    password = data.get("password")
+
+    if not username or not password:
+        return jsonify({"error": "username and password are required"}), 400
+
+    # we'll fill in DB lookup + password check here next  
+    db = get_db()
+    cursor = db.execute(
+        "SELECT * FROM users WHERE username = ?",
+        (username,),
+    )
+    user = cursor.fetchone()
+
+    # If user not found OR password doesn't match, generic failure
+    if not user or not check_password_hash(user["password_hash"], password):
+        return jsonify({"error": "Invalid credentials"}), 401
+
+    # If we get here, credentials are good
+    return jsonify({"username": user["username"]}), 200
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(port=5001, debug=True)
