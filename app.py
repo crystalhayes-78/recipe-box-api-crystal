@@ -166,7 +166,12 @@ def register():
         return jsonify({"error": "an account with that username or email already exists"}), 409
 
     # 4. Return success (do NOT return password or hash)
-   
+    return jsonify({
+        "message": "account created",
+        "username": username,
+        "email": email
+    }), 201
+       
 @app.post("/login")
 def login():
     data = request.get_json(silent=True)
