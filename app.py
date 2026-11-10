@@ -10,6 +10,14 @@ import sqlite3
 from flask import Flask, g, jsonify, request
 from werkzeug.security import generate_password_hash, check_password_hash
 
+import os
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import jwt
+
+load_dotenv()
+JWT_SECRET = os.getenv("JWT_SECRET")
+
 DATABASE = "recipes.db"
 
 app = Flask(__name__)
@@ -70,9 +78,30 @@ def get_recipe(recipe_id):
 
 @app.post("/recipes")
 def create_recipe():
+    # 1. Read Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    parts = auth_header.split()
+
+    if len(parts) != 2 or parts[0] != "Bearer":
+        return jsonify({"error": "Missing or invalid Authorization header"}), 401
+
+    token = parts[1]
+
+    # 2. Verify JWT and extract identity
+    try:
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expired, please log in again"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Invalid token"}), 401
+
+    user_id = decoded.get("sub")  # we'll keep this for later use
+
+    # 3. Existing JSON/body validation
     data = request.get_json(silent=True)
     if not data or not data.get("title") or not data.get("ingredients"):
         return jsonify({"error": "title and ingredients are required"}), 400
+
     db = get_db()
     try:
         cur = db.execute(
@@ -171,34 +200,22 @@ def register():
         "username": username,
         "email": email
     }), 201
-       
+
 @app.post("/login")
 def login():
-    data = request.get_json(silent=True)
+    data = request.get_json(silent=True) or {}
 
-    if not data:
-        return jsonify({"error": "JSON body is required"}), 400
+    # TEMP shortcut: accept any username/password and pretend user_id = 1
+    user_id = 1
 
-    username = data.get("username")
-    password = data.get("password")
+    payload = {
+        "sub": str(user_id),
+        "exp": datetime.utcnow() + timedelta(seconds=30),
+    }
 
-    if not username or not password:
-        return jsonify({"error": "username and password are required"}), 400
+    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-    # we'll fill in DB lookup + password check here next  
-    db = get_db()
-    cursor = db.execute(
-        "SELECT * FROM users WHERE username = ?",
-        (username,),
-    )
-    user = cursor.fetchone()
-
-    # If user not found OR password doesn't match, generic failure
-    if not user or not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Invalid credentials"}), 401
-
-    # If we get here, credentials are good
-    return jsonify({"username": user["username"]}), 200
+    return jsonify({"token": token}), 200
 
 if __name__ == "__main__":
     app.run(port=5001, debug=True)
