@@ -18,6 +18,38 @@ import jwt
 load_dotenv()
 JWT_SECRET = os.getenv("JWT_SECRET")
 
+from functools import wraps
+from flask import g, request, jsonify
+import jwt
+
+def token_required(view_func):
+    @wraps(view_func)
+    def wrapped_view(*args, **kwargs):
+        # 1. Read Authorization header
+        auth_header = request.headers.get("Authorization", "")
+        parts = auth_header.split()
+
+        if len(parts) != 2 or parts[0] != "Bearer":
+            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+
+        token = parts[1]
+
+        # 2. Verify JWT and extract identity
+        try:
+            decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token expired, please log in again"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+
+        # 3. Store user info on `g`
+        g.current_user_id = decoded.get("sub")
+        g.current_user_role = decoded.get("role")
+
+        # 4. Call the original view
+        return view_func(*args, **kwargs)
+
+    return wrapped_view
 DATABASE = "recipes.db"
 
 app = Flask(__name__)
@@ -75,29 +107,13 @@ def get_recipe(recipe_id):
         return jsonify({"error": "recipe not found"}), 404
     return jsonify(recipe_to_dict(row))
 
-
 @app.post("/recipes")
+@token_required
 def create_recipe():
-    # 1. Read Authorization header
-    auth_header = request.headers.get("Authorization", "")
-    parts = auth_header.split()
+    # We already have a verified user at this point
+    user_id = g.current_user_id
 
-    if len(parts) != 2 or parts[0] != "Bearer":
-        return jsonify({"error": "Missing or invalid Authorization header"}), 401
-
-    token = parts[1]
-
-    # 2. Verify JWT and extract identity
-    try:
-        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "Token expired, please log in again"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "Invalid token"}), 401
-
-    user_id = decoded.get("sub")  # we'll keep this for later use
-
-    # 3. Existing JSON/body validation
+    # JSON/body validation
     data = request.get_json(silent=True)
     if not data or not data.get("title") or not data.get("ingredients"):
         return jsonify({"error": "title and ingredients are required"}), 400
@@ -105,29 +121,51 @@ def create_recipe():
     db = get_db()
     try:
         cur = db.execute(
-            "INSERT INTO recipes (title, ingredients, instructions, is_public)"
-            " VALUES (?, ?, ?, ?)",
+            "INSERT INTO recipes (title, ingredients, instructions, is_public, owner_id)"
+            " VALUES (?, ?, ?, ?, ?)",
             (
                 data["title"],
                 data["ingredients"],
                 data.get("instructions", ""),
                 1 if data.get("is_public", True) else 0,
+                user_id,
             ),
         )
         db.commit()
     except sqlite3.IntegrityError:
         return jsonify({"error": "a recipe with that title already exists"}), 409
+
     row = db.execute(
         "SELECT * FROM recipes WHERE id = ?", (cur.lastrowid,)
     ).fetchone()
     return jsonify(recipe_to_dict(row)), 201
 
-
 @app.patch("/recipes/<int:recipe_id>")
+@token_required
 def update_recipe(recipe_id):
+    # User info already verified by token_required
+    user_id = g.current_user_id
+    role = g.current_user_role
+
+    db = get_db()
+
+    # 2. Load recipe to distinguish 404 vs 403
+    row = db.execute(
+        "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
+    ).fetchone()
+
+    if row is None:
+        return jsonify({"error": "recipe not found"}), 404
+
+    # 3. Enforce ownership (or allow admin)
+    if str(row["owner_id"]) != str(user_id) and role != "admin":
+        return jsonify({"error": "forbidden: you do not own this recipe"}), 403
+
+    # 4. Validate body and build update fields
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "a JSON body is required"}), 400
+
     fields, values = [], []
     for column in ("title", "ingredients", "instructions"):
         if column in data:
@@ -136,32 +174,51 @@ def update_recipe(recipe_id):
     if "is_public" in data:
         fields.append("is_public = ?")
         values.append(1 if data["is_public"] else 0)
+
     if not fields:
         return jsonify({"error": "nothing to update"}), 400
+
     values.append(recipe_id)
-    db = get_db()
+
+    # 5. Perform the update (we already know id exists and is owned)
     try:
-        cur = db.execute(
+        db.execute(
             f"UPDATE recipes SET {', '.join(fields)} WHERE id = ?", values
         )
         db.commit()
     except sqlite3.IntegrityError:
         return jsonify({"error": "a recipe with that title already exists"}), 409
-    if cur.rowcount == 0:
-        return jsonify({"error": "recipe not found"}), 404
-    row = db.execute(
+
+    updated = db.execute(
         "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
     ).fetchone()
-    return jsonify(recipe_to_dict(row))
-
+    return jsonify(recipe_to_dict(updated)), 200
 
 @app.delete("/recipes/<int:recipe_id>")
+@token_required
 def delete_recipe(recipe_id):
+    # User info already verified by token_required
+    user_id = g.current_user_id
+    role = g.current_user_role
+
     db = get_db()
-    cur = db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
-    db.commit()
-    if cur.rowcount == 0:
+
+    # 3. Load the recipe first so we can distinguish 404 vs 403
+    row = db.execute(
+        "SELECT id, owner_id FROM recipes WHERE id = ?", (recipe_id,)
+    ).fetchone()
+
+    if row is None:
         return jsonify({"error": "recipe not found"}), 404
+
+    # 4. Enforce ownership (or allow admin)
+    if str(row["owner_id"]) != str(user_id) and role != "admin":
+        return jsonify({"error": "forbidden: you do not own this recipe"}), 403
+
+    # 5. Perform the delete
+    db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
+    db.commit()
+
     return "", 204
 
 @app.post("/register")
@@ -205,11 +262,15 @@ def register():
 def login():
     data = request.get_json(silent=True) or {}
 
-    # TEMP shortcut: accept any username/password and pretend user_id = 1
-    user_id = 1
+    # Allow choosing a fake user_id via the JSON body, default to 1
+    user_id = data.get("user_id", 1)
+
+    # Decide role based on user_id (for now)
+    role = "admin" if user_id == 1 else "user"
 
     payload = {
         "sub": str(user_id),
+        "role": role,
         "exp": datetime.utcnow() + timedelta(seconds=30),
     }
 
