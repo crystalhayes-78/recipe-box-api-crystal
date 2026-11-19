@@ -1,0 +1,46 @@
+# Security Audit – Recipe API
+
+## 1. Credentials storage
+
+**Test:** Inspect `users` table in `recipes.db`  
+**Expected:** Passwords are not stored in plaintext.  
+**Observed:** `users` table has `password_hash` column; sample row shows non-plaintext value.  
+**Verdict:** ✅ Passwords stored as hashes, not plaintext.
+
+---
+
+## 2. Authentication – POST /recipes
+
+**Test 2.1:** POST `/recipes` with no `Authorization` header  
+**Expected:** 401 Unauthorized  
+**Observed:** `HTTP/1.1 401 UNAUTHORIZED` with `{"error":"Missing or invalid Authorization header"}`  
+**Verdict:** ✅ Anonymous users cannot create recipes.
+
+**Test 2.2:** POST `/recipes` with valid JWT (user 2)  
+**Expected:** 201 Created and recipe owned by user 2  
+**Observed:** `HTTP/1.1 201 CREATED` with `{"id":5,"title":"User2 Recipe",...}`  
+**Verdict:** ✅ Authenticated user can create recipes.
+
+---
+
+## 3. Authorization – cross-user access
+
+**Test 3.1:** PATCH `/recipes/1` as user 2 (non-owner)  
+**Expected:** 403 Forbidden, recipe unchanged  
+**Observed:** `HTTP/1.1 403 FORBIDDEN` with `{"error":"forbidden: you do not own this recipe"}`  
+**Verdict:** ✅ Non-owners cannot update others’ recipes.
+
+**Test 3.2:** DELETE `/recipes/1` as user 2 (non-owner)  
+**Expected:** 403 Forbidden, recipe still exists  
+**Observed:** `HTTP/1.1 403 FORBIDDEN` with same error; follow-up `GET /recipes/1` as admin → `200 OK` and recipe still present.  
+**Verdict:** ✅ Non-owners cannot delete others’ recipes; data integrity preserved.
+
+---
+
+## 4. Public read access
+
+**Test 4.1:** GET `/recipes` with no token  
+**Expected (by design):** Public read access allowed  
+**Observed:** `HTTP/1.1 200 OK` and list of recipes (all marked `is_public: true`).  
+**Verdict:** ✅ Read access is intentionally public; not treated as a vulnerability in this design.
+
